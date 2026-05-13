@@ -11,13 +11,18 @@ jobs:
     name: build and test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v6
       - name: Install Rust
         run: rustup update stable && rustup default stable
       - name: Install mdbook
-        uses: taiki-e/install-action@mdbook
-      - name: Install mdbook-linkcheck
-        uses: taiki-e/install-action@mdbook-linkcheck
+        uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook
+      - name: Install mdbook-linkcheck2
+        uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook-linkcheck2
+          fallback: cargo-install
       - run: mdbook build
       - run: cargo test --all --manifest-path=./examples/Cargo.toml --target-dir ./target
       - uses: actions/upload-pages-artifact@v3
