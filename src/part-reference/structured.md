@@ -150,4 +150,4 @@ Given how useful scoped threads are (both in general and for structured concurre
 If you're interested, here are some good blog posts for further reading:
 
 - [Structured Concurrency](https://www.250bpm.com/p/structured-concurrency)
-- [Tree-structured concurrency](https://blog.yoshuawuyts.com/tree-structured-concurrency/)
+- [Tree-structured concurrency](https://blog.yoshuawuyts.com/tree-structured-concurrency/index)
