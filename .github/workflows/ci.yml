@@ -23,18 +23,18 @@ jobs:
         with:
           tool: mdbook-linkcheck2
           fallback: cargo-install
-      - run: mdbook build
+      - run: cd cn && mdbook build
       - run: cargo test --all --manifest-path=./examples/Cargo.toml --target-dir ./target
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: book/html
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && github.repository_owner == 'rust-lang'
+          path: cn/book/html
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && github.repository_owner == 'scheshan'
 
   # Deploy is run as a separate job as it needs elevated permissions
   deploy:
     name: deploy
     needs: test  # the `test` job uploads the pages artifact
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && github.repository_owner == 'rust-lang'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && github.repository_owner == 'scheshan'
     permissions:
       pages: write
       id-token: write
