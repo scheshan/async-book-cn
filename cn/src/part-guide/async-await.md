@@ -1,81 +1,80 @@
-# Async and Await
+# async 与 await
 
-In this chapter we'll get started doing some async programming in Rust and we'll introduce the `async` and `await` keywords.
+本章开始用 Rust 做异步编程，并介绍 `async` 与 `await` 关键字。
 
-`async` is an annotation on functions (and other items, such as traits, which we'll get to later); `await` is an operator used in expressions. But before we jump into those keywords, we need to cover a few core concepts of async programming in Rust, this follows from the discussion in the previous chapter, here we'll relate things directly to Rust programming.
+`async` 是函数（以及 trait 等其他项，后面会讲到）上的标注；`await` 是用于表达式的运算符。在深入这两个关键字之前，需要先了解 Rust 异步编程的几个核心概念——这承接上一章的讨论，这里我们会直接与 Rust 编程对应起来。
 
-## Rust async concepts
+## Rust 异步概念
 
-### The runtime
+### 运行时
 
-Async tasks must be managed and scheduled. There are typically more tasks than cores available so they can't all be run at once. When one stops executing another must be picked to execute. If a task is waiting on IO or some other event, it should not be scheduled, but when that completes, it should be scheduled. That requires interacting with the OS and managing IO work.
+异步任务必须被管理和调度。通常任务数多于可用核心，因此不能全部同时运行。当一个任务停止执行时，必须选出另一个来执行。若任务在等待 I/O 或其他事件，就不应被调度；事件完成后，又应被调度。这需要与 OS 交互并管理 I/O 工作。
 
-Many programming languages provide a runtime. Commonly, this runtime does a lot more than manage async tasks - it might manage memory (including garbage collection), have a role in exception handling, provide an abstraction layer over the OS, or even be a full virtual machine. Rust is a low-level language and strives towards minimal runtime overhead. The async runtime therefore has a much more limited scope than many other languages' runtimes. There are also many ways to design and implement an async runtime, so Rust lets you choose one depending on your requirements, rather than providing one. This does mean that getting started with async programming requires an extra step.
+许多编程语言提供运行时。常见情况下，运行时远不止管理异步任务——还可能管理内存（包括垃圾回收）、参与异常处理、为 OS 提供抽象层，甚至是一个完整的虚拟机。Rust 是底层语言，力求最小的运行时开销，因此异步运行时的职责范围比许多语言小得多。异步运行时的设计与实现方式也很多，Rust 让你按需求选择，而不是内置唯一一种。这也意味着入门异步编程需要多一步。
 
-As well as running and scheduling tasks, a runtime must interact with the OS to manage async IO. It must also provide timer functionality to tasks (which intersects with IO management). There are no strong rules about how a runtime must be structured, but some terms and division of responsibilities are common:
+除了运行和调度任务，运行时还必须与 OS 交互以管理异步 I/O，并向任务提供定时器功能（与 I/O 管理有交集）。对运行时应如何组织没有硬性规则，但一些术语与职责划分很常见：
 
-- *reactor* or *event loop* or *driver* (equivalent terms): dispatches IO and timer events, interacts with the OS, and does the lowest-level driving forward of execution,
-- *scheduler*: determines when tasks can execute and on which OS threads,
-- *executor* or *runtime*: combines the reactor and scheduler, and is the user-facing API for running async tasks; *runtime* is also used to mean the whole library of functionality (e.g., everything in the Tokio crate, not just the Tokio executor which is represented by the [`Runtime`](https://docs.rs/tokio/latest/tokio/runtime/struct.Runtime.html) type).
+- *reactor*、*event loop* 或 *driver*（同义）：分发 I/O 与定时器事件，与 OS 交互，在最底层推进执行；
+- *scheduler*（调度器）：决定任务何时、在哪个 OS 线程上执行；
+- *executor* 或 *runtime*：把 reactor 与 scheduler 组合起来，是面向用户、用于运行异步任务的 API；*runtime* 也用来指整个功能库（例如 Tokio crate 中的全部内容，而不只是由 [`Runtime`](https://docs.rs/tokio/latest/tokio/runtime/struct.Runtime.html) 类型表示的 Tokio 执行器）。
 
-As well as the executor as described above, a runtime crate typically includes many utility traits and functions. These might include traits (e.g., `AsyncRead`) and implementations for IO, functionality for common IO tasks such as networking or accessing the file system, locks, channels, and other synchronisation primitives, utilities for timing, utilities for working with the OS (e.g., signal handling), utility functions for working with futures and streams (async iterators), or monitoring and observation tools. We'll cover many of those in this guide.
+除上述执行器外，运行时 crate 通常还包含许多工具 trait 与函数，例如用于 I/O 的 trait（如 `AsyncRead`）及实现、常见 I/O 任务（网络、文件系统等）、锁、通道与其他同步原语、定时工具、与 OS 协作的工具（如信号处理）、处理 Future 与 stream（异步迭代器）的工具函数，以及监控与观测工具。本指南会涵盖其中许多内容。
 
-There are many async runtimes to choose from. Some have very different scheduling policies, or are optimised for a specific task or domain. For most of this guide we'll use the [Tokio](https://tokio.rs/) runtime. It's a general purpose runtime and is the most popular runtime in the ecosystem. It's a great choice for getting started and for production work. In some circumstances, you might get better performance or be able to write simpler code with a different runtime. Later in this guide we'll discuss some of the other available runtimes and why you might choose one or another, or even write your own.
+可选的异步运行时很多，调度策略差异很大，或针对特定任务/领域优化。本指南大部分内容使用 [Tokio](https://tokio.rs/) 运行时——通用、生态中最流行，适合入门与生产。某些场景下换用其他运行时可能性能更好或代码更简单。后面会讨论其他运行时及如何取舍，甚至如何自己实现。
 
-To get up and running as quickly as possible, you need just a little boilerplate. You'll need to include the Tokio crate as a dependency in your Cargo.toml (just like any other crate):
+要尽快跑起来，只需少量样板代码。在 `Cargo.toml` 中加入 Tokio 依赖（与其他 crate 一样）：
 
 ```
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 ```
 
-And you'll use the `tokio::main` annotation on your `main` function so that it can be an async function (which is otherwise not permitted in Rust):
+并在 `main` 上使用 `tokio::main` 标注，使 `main` 可以是异步函数（否则 Rust 不允许）：
 
 ```rust,norun
 #[tokio::main]
 async fn main() { ... }
 ```
 
-That's it! You're ready to write some asynchronous code!
+就这样！可以开始写异步代码了。
 
-The `#[tokio::main]` annotation initializes the Tokio runtime and starts an async task for running the code in `main`. Later in this guide we'll explain in more detail what that annotation is doing and how to use async code without it (which will give you more flexibility).
+`#[tokio::main]` 会初始化 Tokio 运行时，并启动一个异步任务来运行 `main` 中的代码。本指南后面会更详细说明该标注在做什么，以及如何不用它来写异步代码（从而更灵活）。
 
-### Futures-rs and the ecosystem
+### futures-rs 与生态
 
-TODO context and history, what futures-rs is for - was used a lot, probably don't need it now, overlap with Tokio and other runtimes (sometimes with subtle semantic differences), why you might need it (working with futures directly, esp writing your own, streams, some utils)
+TODO：背景与历史、futures-rs 的用途——曾广泛使用，现在多半不需要；与 Tokio 及其他运行时的重叠（有时语义细微不同）、何时仍可能需要（直接操作 Future，尤其是自己实现 Future、stream、一些工具）。
 
-Other ecosystem stuff - Yosh's crates, alt runtimes, experimental stuff, other?
+其他生态：Yosh 的 crate、替代运行时、实验性项目等？
 
-### Futures and tasks
+### Future 与任务
 
-The basic unit of async concurrency in Rust is the *future*. A future is just a regular old Rust object (a struct or enum, usually) which implements the ['Future'](https://doc.rust-lang.org/std/future/trait.Future.html) trait. A future represents a deferred computation. That is, a computation that will be ready at some point in the future.
+Rust 中异步并发的基本单位是 **Future**。Future 只是实现了 [`Future`](https://doc.rust-lang.org/std/future/trait.Future.html) trait 的普通 Rust 对象（通常是 struct 或 enum）。Future 表示一项*延后*的计算——即在将来某个时刻才会就绪的计算。
 
-We'll talk a lot about futures in this guide, but it's easiest to get started without worrying too much about them. We'll mention them quite a bit in the next few sections, but we won't really define them or use them directly until later. One important aspect of futures is that they can be combined to make new, 'bigger' futures (we'll talk a lot more about *how* they can be combined later).
+本指南会大量讨论 Future，但入门时不必过分纠结，接下来几节会多次提到，直到后面才真正定义并直接使用。Future 的一个重要方面是可以组合成更大、更「复杂」的 Future（*如何*组合后面会详述）。
 
-I've used the term 'async task' quite a bit in an informal way in the previous chapter and this one. I've used the term to mean a logical sequence of execution; analogous to a thread but managed within a program rather than externally by the OS. It is often useful to think in terms of tasks, however, Rust itself has no concept of a task and the term is used to mean different things! It is confusing! To make it worse, runtimes do have a concept of a task and different runtimes have slightly different concepts of tasks.
+上一章和本章里，我非正式地用过「异步任务」一词，指一段逻辑上的执行序列——类似线程，但在程序内管理而非由 OS 管理。用「任务」来思考往往有用，但 Rust 本身没有「任务」这一概念，而且这个词在不同语境含义不同，容易混淆！更糟的是，运行时*有*自己的「任务」概念，不同运行时的定义还略有差别。
 
-From here on in, I'm going to try to be precise about the terminology around tasks. When I use just 'task' I mean the abstract concept of a sequence of computation that may occur concurrently with other tasks. I'll use 'async task' to mean exactly the same thing, but in contrast to a task which is implemented as an OS thread. I'll use 'runtime's task' to mean whatever kind of task a runtime imagines, and 'tokio task' (or some other specific runtime) to mean Tokio's idea of a task.
+下文我会尽量精确使用与任务相关的术语。只说「任务」时，指可能与其它任务并发的一段抽象计算序列。「异步任务」含义相同，但与用 OS 线程实现的任务相对。「运行时的任务」指某运行时心目中的任务；「Tokio 任务」等则指具体运行时的任务。
 
-An async task in Rust is just a future (usually a 'big' future made by combining many others). In other words, a task is a future which is executed. However, there are times when a future is 'executed' without being a runtime's task. This kind of a future is intuitively a *task* but not a *runtime's task*. I'll spell this out more when we get to an example of it.
+Rust 中的异步任务就是 Future（通常是由许多小 Future 组合成的「大」Future）。换句话说，任务就是*被执行*的 Future。但有时 Future 被「执行」却并不是运行时的任务——直觉上它是*任务*，却不是*运行时的任务*。遇到例子时会再说明。
 
+## 异步函数
 
-## Async functions 
+`async` 关键字修饰函数声明，例如 `pub async fn send_to_server(...)`。**异步函数**就是用 `async` 声明的函数，含义是它可以被异步执行——换句话说，调用方*可以选择不*等函数完成就去做别的事。
 
-The `async` keyword is a modifier on function declarations. E.g., we can write `pub async fn send_to_server(...)`. An async function is simply a function declared using the `async` keyword, and what that means is that it is a function which can be executed asynchronously, in other words the caller *can choose not to* wait for the function to complete before doing something else.
+更机械地说：调用异步函数时，函数体不会像普通函数那样立即执行，而是把函数体与参数打包成一个 Future，作为返回值代替真实结果。调用方再决定如何处理该 Future（若调用方想「立刻」要结果，就会 `await` 这个 Future，见下一节）。
 
-In more mechanical terms, when an async function is called, the body is not executed as it would be for a regular function. Instead the function body and its arguments are packaged into a future which is returned in lieu of a real result. The caller can then decide what to do with that future (if the caller wants the result 'straight away', then it will `await` the future, see the next section).
+在异步函数内部，代码仍按平常的*顺序*方式执行[^preempt]，是否 async 并无区别。可以在异步函数里调用同步函数，执行照常进行。异步函数里多出来的是可以用 `await` 等待其他异步函数（或 Future），这*可能*导致交出控制权，让其他任务执行。
 
-Within an async function, code is executed in the usual, sequential way[^preempt], being async makes no difference. You can call synchronous functions from async functions, and execution proceeds as usual. One extra thing you can do within an async function is use `await` to await other async functions (or futures), which *may* cause yielding of control so that another task can execute.
-
-[^preempt]: like any other thread, the thread the async function is running on may be pre-empted by the operating system and paused so another thread can get some work done. However, from the function's point of view this is not observable without inspecting data which may have been modified by other threads (and which could have been modified by another thread executing in parallel without the current thread being paused).
+[^preempt]: 与其他线程一样，运行异步函数的 OS 线程也可能被操作系统抢占、暂停以便其他线程工作。但从函数自身视角，若不检查可能被其他线程修改的数据，这种抢占是不可观察的（那些数据也可能在不停顿当前线程的情况下被并行修改）。
 
 ## `await`
 
-We stated above that a future is a computation that will be ready at some point in the future. To get the result of that computation, we use the `await` keyword. If the result is ready immediately or can be computed without waiting, then `await` simply does that computation to produce the result. However, if the result is not ready, then `await` hands control over to the scheduler so that another task can proceed (this is cooperative multitasking mentioned in the previous chapter).
+前面说过，Future 是在将来某刻才会就绪的计算。要得到计算结果，使用 `await` 关键字。若结果已就绪或无需等待即可算出，`await` 就直接完成计算并给出结果；若尚未就绪，`await` 把控制权交给调度器，让其他任务继续（即上一章的协作式多任务）。
 
-The syntax for using await is `some_future.await`, i.e., it is a postfix keyword used with the `.` operator. That means it can be used ergonomically in chains of method calls and field accesses.
+语法是 `some_future.await`，即作为后缀关键字与 `.` 运算符一起使用，因此在方法链和字段访问中可以很顺手地书写。
 
-Consider the following functions:
+考虑以下函数：
 
 ```rust,norun
 // An async function, but it doesn't need to wait for anything.
@@ -89,41 +88,41 @@ async fn wait_to_add(a: u32, b: u32) -> u32 {
 }
 ```
 
-If we call `add(15, 3).await` then it will return immediately with the result `18`. If we call `wait_to_add(15, 3).await`, we will eventually get the same answer, but while we wait another task will get an opportunity to run.
+若调用 `add(15, 3).await`，会立刻得到 `18`。若调用 `wait_to_add(15, 3).await`，最终也是同样结果，但在等待期间其他任务有机会运行。
 
-In this silly example, the call to `sleep` is a stand-in for doing some long-running task where we have to wait for the result. This is usually an IO operation where the result is data read from an external source or confirmation that writing to an external destination succeeded. Reading looks something like `let data = read(...).await?`. In this case `await` will cause the current task to wait while the read happens. The task will resume once reading is completed (other tasks could get some work done while the reading task waits). The result of reading could be data successfully read or an error (handled by the `?`).
+在这个简单例子里，`sleep` 代表需要等待结果的耗时操作，通常是 I/O：从外部读取数据，或确认写入外部目标成功。读取类似 `let data = read(...).await?`：此时 `await` 会让当前任务在读取进行期间等待，读取完成后任务恢复（等待期间其他任务可以工作）。读取结果可能是成功读到的数据，也可能是错误（由 `?` 处理）。
 
-Note that if we call `add` or `wait_to_add` or `read` without using `.await` we won't get any answer!
+注意：若调用 `add`、`wait_to_add` 或 `read` 时不用 `.await`，不会得到任何答案！
 
-What?
+什么？
 
-Calling an async function returns a future, it doesn't immediately execute the code in the function. Furthermore, a future does not do any work until it is awaited[^poll]. This is in contrast to some other languages where an async function returns a future which begins executing immediately.
+调用异步函数返回的是 Future，不会立刻执行函数里的代码。而且 Future 在被 `await` 之前不会做任何事情[^poll]。这与某些语言不同——那些语言里 async 函数返回的 Future 会立即开始执行。
 
-This is an important point about async programming in Rust. After a while it will be second nature, but it often trips up beginners, especially those who have experience with async programming in other languages.
+这是 Rust 异步编程的重要一点，熟悉后会成为本能，但常让新手踩坑，尤其是有其他语言异步经验的人。
 
-An important intuition about futures in Rust is that they are inert objects. To get any work done they must be driven forward by an external force (usually an async runtime).
+Rust 中 Future 的一个重要直觉是：它们是*惰性*对象，必须由外部力量（通常是异步运行时）驱动才会真正干活。
 
-We've described `await` quite operationally (it runs a future, producing a result), but we talked in the previous chapter about async tasks and concurrency, how does `await` fit into that mental model? First, let's consider pure sequential code: logically, calling a function simply executes the code in the function (with some assignment of variables). In other words, the current task continues executing the next 'chunk' of code which is defined by the function. Similarly, in an async context, calling a non-async function simply continues execution with that function. Calling an async function finds the code to run, but doesn't run it. `await` is an operator which continues execution of the current task, or if the current task can't continue right now, gives another task an opportunity to continue.
+我们把 `await` 描述得很「操作性」（运行 Future 得到结果），但上一章还谈了异步任务与并发——`await` 如何融入那套心智模型？先看纯顺序代码：逻辑上调用函数就是执行函数里的代码（并绑定变量），即当前任务继续执行由该函数定义的下一「块」代码。类似地，在异步上下文里调用非 async 函数，就是继续执行该函数；调用 async 函数则找到要运行的代码，但*不*运行它。`await` 是继续执行当前任务的运算符；若当前任务此刻无法继续，就让其他任务有机会继续。
 
-`await` can only be used inside an async context, for now that means inside an async function (we'll see more kinds of async contexts later). To understand why, remember that `await` might hand over control to the runtime so that another task can execute. There is only a runtime to hand control to in an async context. For now, you can imagine the runtime like a global variable which is only accessible in async functions, we'll explain later how it really works.
+`await` 只能在异步上下文中使用——目前指 async 函数内部（后面会看到更多异步上下文）。原因是 `await` 可能把控制权交给运行时，让其他任务执行，而只有异步上下文里才有运行时。暂时可以把运行时想成只在 async 函数里可访问的「全局变量」，后面会说明实际机制。
 
-Finally, for one more perspective on `await`: we mentioned earlier that futures can be combined together to make 'bigger' futures. `async` functions are one way to define a future, and `await` is one way to combine futures. Using `await` on a future combines that future into the future produced by the async function it's used inside. We'll talk in more detail about this perspective and other ways to combine futures later.
+再从另一个角度看 `await`：前面提到 Future 可以组合成更大的 Future。`async` 函数是定义 Future 的一种方式，`await` 是组合 Future 的一种方式。在某个 async 函数里对 Future 使用 `await`，就把该 Future 组合进该 async 函数所产生的 Future 里。这种视角及其他组合方式后面会详述。
 
-[^poll]: Or polled, which is a lower-level operation than `await` and happens behind the scenes when using `await`. We'll talk about polling later when we talk about futures in detail.
+[^poll]: 或通过*轮询*（poll）——比 `await` 更底层的操作，使用 `await` 时在幕后发生。讨论 Future 细节时会再讲轮询。
 
-## Some async/await examples
+## 一些 async/await 示例
 
-Let's start by revisiting our 'hello, world!' example:
+先从「hello, world!」回顾：
 
 ```rust,edition2021
 {{#include ../../examples/hello-world/src/main.rs}}
 ```
 
-You should now recognise the boilerplate around `main`. It's for initializing the Tokio runtime and creating an initial task to run the async `main` function.
+你现在应能认出 `main` 周围的样板：用于初始化 Tokio 运行时并创建初始任务来运行 async 的 `main`。
 
-`say_hello` is an async function, when we call it, we have to follow the call with `.await` to run it as part of the current task. Note that if you remove the `.await`, then running the program does nothing! Calling `say_hello` returns a future, but it is never executed so `println` is never called (the compiler will warn you, at least).
+`say_hello` 是异步函数，调用后必须跟 `.await` 才能作为当前任务的一部分运行。注意：若去掉 `.await`，程序什么也不做！调用 `say_hello` 只返回 Future，从未执行，因此 `println` 不会被调用（编译器至少会警告）。
 
-Here's a slightly more realistic example, taken from the [Tokio tutorial](https://tokio.rs/tokio/tutorial/hello-tokio).
+下面是一个稍贴近实际的例子，来自 [Tokio 教程](https://tokio.rs/tokio/tutorial/hello-tokio)。
 
 ```rust,norun
 #[tokio::main]
@@ -143,63 +142,62 @@ async fn main() -> Result<()> {
 }
 ```
 
-The code is a bit more interesting, but we're essentially doing the same thing - calling async functions and then awaiting to execute the result. This time we're using `?` for error handling - it works just like in synchronous Rust.
+代码更有趣一些，但本质相同——调用异步函数，再 `await` 以执行。这里用 `?` 做错误处理，与同步 Rust 一样。
 
-For all the talk so far about concurrency, parallelism, and asynchrony, both these examples are 100% sequential. Just calling and awaiting async functions does not introduce any concurrency unless there are other tasks to schedule while the awaiting task is waiting. To prove this to ourselves, lets look at another simple (but contrived) example:
+尽管前面大谈并发、并行与异步，这两个例子都是 100% 顺序的。仅仅调用并 `await` 异步函数并不会引入并发，除非在等待期间还有其他任务可被调度。用另一个简单（人为的）例子自证：
 
 ```rust,edition2021
 {{#include ../../examples/hello-world-sleep/src/main.rs}}
 ```
 
-Between printing "hello" and "world", we put the current task to sleep[^async-sleep] for one second. Observe what happens when we run the program: it prints "hello", does nothing for one second, then prints "world". That is because executing a single task is purely sequential. If we had some concurrency, then that one second nap would be an excellent opportunity to get some other work done, like printing "world". We'll see how to do that in the next section.
+在打印 "hello" 与 "world" 之间，让当前任务睡眠[^async-sleep] 一秒。运行程序：先打印 "hello"，空等一秒，再打印 "world"。因为执行单个任务完全是顺序的。若有并发，这一秒的睡眠正是做别的事（比如先打印 "world"）的好机会。下一节会看到如何实现。
 
-[^async-sleep]: Note that we're using an async sleep function here, if we were to use [`sleep`](https://doc.rust-lang.org/std/thread/fn.sleep.html) from std we'd put the whole thread to sleep. That wouldn't make any difference in this toy example but in a real program it would mean other tasks could not be scheduled on that thread during that time. That is very bad.
+[^async-sleep]: 这里用的是异步 sleep。若用 std 的 [`sleep`](https://doc.rust-lang.org/std/thread/fn.sleep.html)，会把整个线程睡死。在这个玩具例子里差别不大，但在真实程序里意味着该线程上的其他任务在这段时间内无法被调度，非常糟糕。
 
 
-## Spawning tasks
+## 生成任务
 
-We've talked about async and await as a way to run code in an async task. And we've said that `await` can put the current task to sleep while it waits for IO or some other event. When that happens, another task can run, but how do those other tasks come about? Just like we use `std::thread::spawn` to spawn a new task, we can use [`tokio::spawn`](https://docs.rs/tokio/latest/tokio/task/fn.spawn.html) to spawn a new async task. Note that `spawn` is a function of Tokio, the runtime, not from Rust's standard library, because tasks are purely a runtime concept.
+我们把 async/await 当作在异步任务里运行代码的方式，并说 `await` 可以在等待 I/O 或其他事件时让当前任务睡眠，此时其他任务可以运行——那些任务从哪来？就像用 `std::thread::spawn` 生成新线程任务，可以用 [`tokio::spawn`](https://docs.rs/tokio/latest/tokio/task/fn.spawn.html) 生成新的异步任务。注意 `spawn` 属于 Tokio 运行时，而非标准库，因为「任务」纯粹是运行时概念。
 
-Here's a tiny example of running an async function on a separate task by using `spawn`:
+下面是用 `spawn` 在单独任务上运行异步函数的小例子：
 
 ```rust,edition2021
 {{#include ../../examples/hello-world-spawn/src/main.rs}}
 ```
 
-Similar to the last example, we have two functions printing "hello" and "world!". But this time we run them concurrently (and in parallel) rather than sequentially. If you run the program a few times you should see the strings printing in both orders - sometimes "hello" first, sometimes "world!" first. A classic concurrent race!
+与上一例类似，两个函数分别打印 "hello" 和 "world!"，但这次是并发（且并行）而非顺序执行。多运行几次，应能看到两种顺序——有时先 "hello"，有时先 "world!"，典型的并发竞态！
 
-Let's dive into what is happening here. There are three concepts in play: futures, tasks, and threads. The `spawn` function takes a future (which remember can be made up of many smaller futures) and runs it as a new Tokio task. Tasks are the concept which the Tokio runtime schedules and manages (not individual futures). Tokio (in its default configuration) is a multi-threaded runtime which means that when we spawn a new task, that task may be run on a different OS thread from the task it was spawned from (it may be run on the same thread, or it may start on one thread and then be moved to another later on).
+来看这里发生了什么。涉及三个概念：Future、任务与线程。`spawn` 接受一个 Future（记住可由许多小 Future 组成），把它作为新的 Tokio 任务运行。Tokio 调度和管理的是*任务*（不是单个 Future）。Tokio（默认配置下）是多线程运行时，因此生成新任务时，该任务可能在不同于生成方的 OS 线程上运行（也可能在同一线程，或先在一线程上跑再迁到另一线程）。
 
-So, when a future is spawned as a task it runs *concurrently* with the task it was spawned from and any other tasks. It may also run in parallel to those tasks if it is scheduled on a different thread.
+因此，Future 被 `spawn` 成任务后，会与生成它的任务及其他任务*并发*执行；若被调度到不同线程，还可能与那些任务*并行*。
 
-To summarise, when we write two statements following each other in Rust, they are executed sequentially (whether in async code or not). When we write `await`, that does not change the concurrency of sequential statements. E.g., `foo(); bar();` is strictly sequential - `foo` is called and afterwards, `bar` is called. That is true whether `foo` and `bar` are async functions or not. `foo().await; bar().await;` is also strictly sequential, `foo` is fully evaluated and then `bar` is fully evaluated. In both cases another thread might be interleaved with the sequential execution and in the second case, another async task might be interleaved at the await points, but the two statements are executed sequentially *with respect to each other* in both cases.
+概括：在 Rust 里写两条顺序语句，就是顺序执行（无论是否 async）。写 `await` 不会改变顺序语句的并发性。例如 `foo(); bar();` 严格顺序——先调用 `foo`，再调用 `bar`；无论 `foo`、`bar` 是否 async 皆然。`foo().await; bar().await;` 也严格顺序——`foo` 完全求值后再完全求值 `bar`。两种情况下，其他线程都可能与这段顺序执行交错；第二种情况下，在 `await` 点还可能与其他异步任务交错，但两条语句*彼此*仍是顺序的。
 
-If we use either `thread::spawn` or `tokio::spawn` we introduce concurrency and potentially parallelism, in the first case between threads and in the second between tasks.
+使用 `thread::spawn` 或 `tokio::spawn` 会引入并发，并可能引入并行——前者在线程之间，后者在任务之间。
 
-Later in the guide we'll see cases where we execute futures concurrently, but never in parallel.
+本指南后面还会看到：有些场景下 Future 会并发执行，但永远不会并行执行。
 
 
-### Joining tasks
+### 合并（join）任务
 
-If we want to get the result of executing a spawned task, then the spawning task can wait for it to finish and use the result, this is called *joining* the tasks (analogous to [joining](https://doc.rust-lang.org/std/thread/struct.JoinHandle.html#method.join) threads, and the APIs for joining are similar).
+若要拿到已生成任务的执行结果，生成方可以等待它结束并使用结果，这称为*合并*（join）任务（类比[合并](https://doc.rust-lang.org/std/thread/struct.JoinHandle.html#method.join)线程，API 也类似）。
 
-When a task is spawned, the spawn function returns a [`JoinHandle`](https://docs.rs/tokio/latest/tokio/task/struct.JoinHandle.html). If you just want the task to do it's own thing executing, the `JoinHandle` can be discarded (dropping the `JoinHandle` does not affect the spawned task). But if you want the spawning task to wait for the spawned task to complete and then use the result, you can `await` the `JoinHandle` to do so.
+任务被 `spawn` 时，`spawn` 返回 [`JoinHandle`](https://docs.rs/tokio/latest/tokio/task/struct.JoinHandle.html)。若只想让任务自己跑，可以丢弃 `JoinHandle`（丢弃不影响已生成的任务）。若生成方要等被生成任务完成再用结果，可以对 `JoinHandle` 使用 `await`。
 
-For example, let's revisit our 'Hello, world!' example one more time:
-
+再回顾一次「Hello, world!」：
 
 ```rust,edition2021
 {{#include ../../examples/hello-world-join/src/main.rs}}
 ```
 
-The code is similar to last time, but instead of just calling `spawn`, we save the returned `JoinHandle`s and later `await` them. Since we're waiting for those tasks to complete before we exit the `main` function, we no longer need the `sleep` in `main`.
+代码与上次类似，但这次保存 `spawn` 返回的 `JoinHandle`，稍后再 `await`。因为我们在退出 `main` 前等待这些任务完成，`main` 里不再需要 `sleep`。
 
-The two spawned tasks are still executing concurrently. If you run the program a few times you should see both orderings. However, the `await`ed join handles are a limit on the concurrency: the final exclamation mark ('!') will *always* be printed last (you could experiment with moving `println!("!");` relative to the `await`s. You'll probably need to change with the sleep times too to get observable effects).
+两个被生成的任务仍在并发执行，多运行几次仍应看到两种顺序。但被 `await` 的 `JoinHandle` 限制了并发：最后的感叹号（`!`）*总是*最后打印（可把 `println!("!");` 相对 `await` 的位置改改试试，可能还要改 sleep 时间才能观察到效果）。
 
-If we immediately `await`ed the `JoinHandle` of the first `spawn` rather than saved it and later `await`ed (i.e., written `spawn(say_hello()).await;`), then we'd have spawned another task to run the 'hello' future, but the spawning task would have waited for it to finish before doing anything else. In other words, there is no possible concurrency! You almost never want to do this (because why bother with the spawn? Just write the sequential code).
+若立刻 `await` 第一个 `spawn` 的 `JoinHandle`（写成 `spawn(say_hello()).await;`），则虽生成了运行 'hello' Future 的另一任务，但生成方会等它结束才做别的事——也就是说不可能有并发！几乎永远不该这样做（何必 spawn？直接写顺序代码即可）。
 
 ### `JoinHandle`
 
-We'll quickly look at `JoinHandle` in a little more depth. The fact that we can `await` a `JoinHandle` is a clue that a `JoinHandle` is itself a future. `spawn` is not an `async` function, it's a regular function that returns a future (`JoinHandle`). It does some work (to schedule the task) before returning the future (unlike an async future), which is why we don't *need* to `await` `spawn`. Awaiting a `JoinHandle` waits for the spawned task to complete and then returns the result. In the above example, there was no result, we just waited for the task to complete. `JoinHandle` is a generic type and it's type parameter is the type returned by the spawned task. In the above example, the type would be `JoinHandle<()>`, a future that results in a `String` would produce a `JoinHandle` with type `JoinHandle<String>`.
+简要深入 `JoinHandle`。能对 `JoinHandle` 使用 `await`，说明 `JoinHandle` 本身也是 Future。`spawn` 不是 `async` 函数，而是返回 Future（`JoinHandle`）的普通函数；它在返回 Future 前会做一些工作（调度任务），因此*不必*对 `spawn` 本身 `await`。`await` `JoinHandle` 会等待被生成任务完成并返回结果。上例没有返回值，只等待完成。`JoinHandle` 是泛型，类型参数是被生成任务的返回类型；上例类型为 `JoinHandle<()>`，返回 `String` 的 Future 会得到 `JoinHandle<String>`。
 
-`await`ing a `JoinHandle` returns a `Result` (which is why we used `let _ = ...` in the above example, it avoids a warning about an unused `Result`). If the spawned task completed successfully, then the task's result will be in the `Ok` variant. If the task panicked or was aborted (a form of [cancellation](../part-reference/cancellation.md)), then the result will be an `Err` containing a [`JoinError` docs](https://docs.rs/tokio/latest/tokio/task/struct.JoinError.html). If you are not using cancellation via `abort` in your project, then `unwrapping` the result of `JoinHandle.await` is a reasonable approach, since that is effectively propagating a panic from the spawned task to the spawning task.
+`await` `JoinHandle` 得到的是 `Result`（上例用 `let _ = ...` 是为避免未使用 `Result` 的警告）。若被生成任务正常完成，结果在 `Ok` 中；若任务 panic 或被中止（一种[取消](../part-reference/cancellation.md)形式），结果为包含 [`JoinError`](https://docs.rs/tokio/latest/tokio/task/struct.JoinError.html) 的 `Err`。若项目不用 `abort` 做取消，对 `JoinHandle.await` 的结果 `unwrap` 是合理做法，相当于把被生成任务的 panic 传播到生成方。

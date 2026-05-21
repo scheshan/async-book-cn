@@ -9,9 +9,9 @@
 
 # Part 1: guide
 
-- [Introduction](part-guide/intro.md)
-- [Concurrent programming](part-guide/concurrency.md)
-- [Async and await](part-guide/async-await.md)
+- [介绍](part-guide/intro.md)
+- [并发编程](part-guide/concurrency.md)
+- [Async 和 await](part-guide/async-await.md)
 - [More async/await topics](part-guide/more-async-await.md)
 - [IO and issues with blocking](part-guide/io.md)
 - [Composing futures concurrently](part-guide/concurrency-primitives.md)
