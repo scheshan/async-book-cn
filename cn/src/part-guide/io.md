@@ -1,21 +1,21 @@
-# IO and issues with blocking
+# I/O 与阻塞问题
 
-Efficiently handling IO (input/output) is one of the primary motivators for async programming and most async programs do lots of IO. At it's root, the issue with IO is that it takes orders of magnitude more time than computation, therefore just waiting for IO to complete rather than getting on with other work is incredibly inefficient. Ideally, async programming lets a program get on with other work while waiting for IO.
+高效处理 I/O（输入/输出）是异步编程的主要动机之一，多数异步程序会做大量 I/O。根本原因在于：I/O 比计算慢几个数量级，干等 I/O 完成而不去做别的事极其低效。理想情况下，异步编程让程序在等待 I/O 时仍能推进其他工作。
 
-This chapter is an introduction to IO in the async context. We'll cover the important difference between blocking and non-blocking IO, and why blocking IO and async programming don't mix (at least not without a bit of thought and effort). We'll cover how to use non-blocking IO, then look at some of the issues which can crop up with IO and async programming. We'll also look at how the OS handles IO and have a sneak peek at some alternative IO methods like io_uring.
+本章介绍异步语境下的 I/O：阻塞与非阻塞 I/O 的重要区别，以及为何阻塞 I/O 与异步编程不搭（至少不能不经思考与额外努力就混用）；如何使用非阻塞 I/O；I/O 与异步编程可能遇到的问题；OS 如何处理 I/O；并简要提及 io_uring 等替代 I/O 方式。
 
-We'll finish by covering some other ways of blocking an async task (which is bad) and how to properly mix async programming with blocking IO or long-running, CPU-intensive code.
+最后会讨论阻塞异步任务的其他方式（这很糟糕），以及如何正确把异步编程与阻塞 I/O 或长时间、CPU 密集型计算结合起来。
 
 
-## Blocking and non-blocking IO
+## 阻塞与非阻塞 I/O
 
-IO is implemented by the operating system; the work of IO takes place in separate processes and/or in dedicated hardware, in either case outside of the program's process. IO can be either synchronous or asynchronous (aka blocking and non-blocking, respectively). Synchronous IO means that the program (or at least the thread) waits (aka blocks) while the IO takes place and doesn't start processing until the IO is complete and the result is received from the OS. Asynchronous IO means that the program can continue to make progress while the IO takes place and can pick up the result later. There are many different OS APIs for both kinds of IO, though more variety in the asynchronous space.
+I/O 由操作系统实现；实际工作在独立进程和/或专用硬件中完成，都在程序进程之外。I/O 可以是同步或异步的（分别又称阻塞与非阻塞）。**同步 I/O** 指程序（或至少线程）在 I/O 进行期间等待（即阻塞），直到 I/O 完成并从 OS 收到结果才开始后续处理。**异步 I/O** 指程序在 I/O 进行期间仍可推进，稍后再取结果。两类 I/O 都有多种 OS API，异步一侧种类更多。
 
-Asynchronous IO and asynchronous programming are not intrinsically linked. However, async programming facilitates ergonomic and performant async IO, and that is a major motivation for async programming. Blocking due to synchronous IO is a major source of performance issues with async programming, and we must be careful to avoid it (more on this below).
+异步 I/O 与异步编程并非天然绑定，但异步编程便于写出符合人体工学且高性能的异步 I/O，这也是异步编程的重要动机。同步 I/O 导致的阻塞是异步编程性能问题的主要来源，必须小心避免（下文详述）。
 
-Rust's standard library includes functions and traits for blocking IO. For non-blocking IO, you must use specialized libraries, which are often part of the async runtime, e.g., Tokio's [`io`](https://docs.rs/tokio/latest/tokio/io/index.html) module.
+Rust 标准库提供阻塞 I/O 的函数与 trait。非阻塞 I/O 须用专用库，常属于异步运行时的一部分，例如 Tokio 的 [`io`](https://docs.rs/tokio/latest/tokio/io/index.html) 模块。
 
-Let's quickly look at an example (adapted from the Tokio docs):
+快速看一个例子（改编自 Tokio 文档）：
 
 ```rust
 use tokio::{io::AsyncWriteExt, net::TcpStream};
@@ -28,114 +28,111 @@ async fn write_hello() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`write_all` is an async IO method which writes data to `stream`. This might complete immediately, but more likely this will take some time to complete, so `stream.write_all(...).await` will cause the current task to be paused while it waits for the OS to handle the write. The scheduler will run other tasks and when the write is complete, it will wake up the task and schedule it to continue working.
+`write_all` 是向 `stream` 写入数据的异步 I/O 方法。可能立刻完成，但更可能需一段时间，因此 `stream.write_all(...).await` 会让当前任务在等待 OS 完成写入时暂停。调度器会运行其他任务；写入完成后唤醒该任务并继续调度。
 
-However, if we used a write function from the standard library, the async scheduler would not be involved and the OS would pause the whole thread while the IO completes, meaning that not only is the current task paused but no other task can be executed using that thread. If this happens to all threads in the runtime's thread pool (which in some circumstances can be just one thread), then the whole program stops and cannot make progress. This is called blocking the thread (or program) and is very bad for performance. It is important to never block threads in an async program, and thus you should avoid using blocking IO in an async task.
+若使用标准库的写函数，异步调度器不会参与，OS 会在 I/O 完成前暂停整条线程——不仅当前任务停住，该线程上也无法执行其他任务。若运行时线程池里的所有线程都如此（某些情况下可能只有一条线程），整个程序会停住、无法推进。这称为阻塞线程（或程序），对性能非常有害。异步程序中绝不应阻塞线程，因此在异步任务中应避免阻塞 I/O。
 
-Blocking a thread can be caused by long-running tasks or tasks waiting for locks, as well as by blocking IO. We'll discuss this more at [the end of this chapter](#other-blocking-operations).
+长时间运行的任务、等待锁等也会导致线程阻塞，不仅是阻塞 I/O。本章[末尾](#其他阻塞操作)会再讨论。
 
-It is a common pattern to repeatedly read or write, and streams and sinks (aka async iterators) are a convenient mechanism for doing so. They're covered in a [dedicated chapter](streams.md).
-
-
-## Reading and writing
-
-TODO
-
-- async Read and Write traits
-  - part of the runtime
-- how to use
-- specific implementations
-  - network vs disk
-    - tcp, udp
-    - file system is not really async, but io_uring (ref to that chapter)
-  - practical examples
-  - stdout, etc.
-  - pipe, fd, etc.
+反复读写的模式很常见，stream 与 sink（即异步迭代器）是便利机制，在[专门一章](streams.md)中介绍。
 
 
-## Memory management
-
-When we read data we need to put it somewhere and when we write data it needs to be kept somewhere until the write completes. In either case, how that memory is mangaged is important.
+## 读写
 
 TODO
 
+- 异步 Read / Write trait
+  - 属于运行时的一部分
+- 如何使用
+- 具体实现
+  - 网络 vs 磁盘
+    - tcp、udp
+    - 文件系统并非真正异步，但可用 io_uring（参见相关章节）
+  - 实用示例
+  - stdout 等
+  - pipe、fd 等
 
-- Issues with buffer management and async IO
-- Different solutions and pros and cons
-  - zero-copy approach
-  - shared buffer approach
-- Utility crates to help with this, Bytes, etc.
 
-## Advanced topics on IO
+## 内存管理
+
+读取数据需要存放之处，写入数据在写完成前也需要暂存。无论哪种情况，内存如何管理都很重要。
 
 TODO
 
+- 缓冲区管理与异步 I/O 的问题
+- 不同方案及利弊
+  - 零拷贝
+  - 共享缓冲区
+- 辅助 crate，如 Bytes 等
+
+## I/O 进阶主题
+
+TODO
 
 - buf read/write
-- Read + Write, split, join
+- Read + Write、split、join
 - copy
-- simplex and duplex
-- cancelation
-- what if we have to do sync IO? Spawn a thread or use spawn_blocking (see below)
+- 单工与双工
+- 取消
+- 若必须做同步 I/O？生成线程或使用 spawn_blocking（见下文）
 
-## The OS view of IO
+## 从 OS 视角看 I/O
 
 TODO
 
-- Different kinds of IO and mechanisms, completion IO, reference to completion IO chapter in adv section
-  - different runtimes can faciliate this
-  - mio for low-level interface
+- 各类 I/O 与机制、completion I/O，进阶部分 completion I/O 章节
+  - 不同运行时可提供支持
+  - mio 作为底层接口
+
+## 其他阻塞操作
+
+如本章开头所述，不阻塞线程对异步程序性能至关重要。各类阻塞 I/O 是常见阻塞方式，但大量计算或以异步调度器未协调的方式等待也会阻塞。
+
+等待最常见于使用非异步感知的同步机制，例如用 `std::sync::Mutex` 而非异步 mutex，或等待非 async 通道。这在[通道、锁与同步](sync.md)一章讨论。还有其他阻塞式等待方式，一般需找到非阻塞或异步友好的机制，例如用异步 `sleep` 而非 std 的。等待也可能是忙等（实质是空转循环，即自旋锁），应尽量避免。
+
+### CPU 密集型工作
+
+长时间运行（CPU 密集或 CPU-bound）的工作会阻止调度器运行其他任务。这*是*一种阻塞，但不如阻塞在 I/O 或等待上那么糟——至少程序还在推进。然而（若不谨慎），按某些指标（如尾延迟）性能可能欠佳，若无法运行的任务本应在特定时刻运行，还可能影响正确性。有种说法认为 CPU 密集型工作根本不该用 async Rust（或 Tokio 这类通用运行时），这过于简化。正确说法是：若不特别处理，不能把 I/O 密集与 CPU 密集（或更精确地说，长时间运行与延迟敏感）的任务混在一起还指望一切顺利。
+
+本节余下部分假设你同时有延迟敏感任务和长时间 CPU 密集型任务。若没有任何延迟敏感部分，情况会简单一些（大多更容易处理）。
+
+运行长时间或阻塞任务大体有三种做法：用运行时内置设施、单独线程、或单独运行时。
+
+在 Tokio 中可用 [`spawn_blocking`](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html) 生成可能阻塞的任务。用法类似 `spawn`，但在为可能阻塞的任务优化的独立线程池中运行（任务很可能独占一条线程）。注意这里运行的是普通同步代码，不是异步任务，因此任务无法被取消（尽管其 `JoinHandle` 有 `abort` 方法）。其他运行时有类似功能。
+
+可用 [`std::thread::spawn`](https://doc.rust-lang.org/stable/std/thread/fn.spawn.html)（或类似 API）起线程做阻塞工作，很直接。若需运行大量任务，可能需要线程池或工作调度器。若不断生成线程且数量远超核心数，吞吐量会受损。[Rayon](https://github.com/rayon-rs/rayon) 是流行选择，便于运行和管理并行任务；针对工作负载定制、或对任务类型有了解的方案可能性能更好。
+
+可为延迟敏感任务与长时间任务各用一份异步运行时实例。这适合 CPU-bound 任务，但即使在「长时间任务」的运行时上也不应使用阻塞 I/O。对 CPU-bound 任务，这是唯一能让长时间任务仍是 async 任务的方案；也灵活（两个运行时可按任务类型优化配置，要获得最佳性能必须投入配置精力），并能利用 Tokio 等成熟子系统。甚至可用两种不同异步运行时。无论如何，各运行时须跑在不同线程上。
+
+另一方面需要多想一想：必须保证任务跑在正确的运行时上（可能比听起来难），任务间通信也更复杂。下一章会讨论同步与异步上下文之间的同步，多个异步运行时之间可能更棘手。每个运行时都是自己的小宇宙，调度器彼此独立。Tokio 的 channel 与锁*可以*跨运行时使用（甚至非 Tokio 运行时），其他运行时的原语未必如此。
+
+由于各运行时的调度器互不知晓对方（OS 也不知晓任何异步调度器），调度之间没有协调或共享优先级，工作也无法在运行时之间被窃取。因此任务调度可能欠佳（尤其当运行时未针对负载调优时）。此外，调度全是协作式的，长时间任务仍可能饿死、延迟变差。见[下一节](#主动让出)，了解如何让长时间任务更协作。
+
+纯作调度器时，用 Tokio 做 CPU 工作比专用同步 worker 池开销略高，这不难理解——要支持异步编程就要多做事。对多数用户实践中问题不大，但若代码极度性能敏感值得考虑。
+
+无论采用上述哪种方案，任务都会跑在不同上下文（同步与异步，或不同异步运行时）。若需在任务间通信，须注意同步/异步原语（channel、mutex 等）的组合是否正确，以及对这些原语使用阻塞还是非阻塞方法。对 mutex 等锁：若需在 await 点持有锁或保护 I/O 资源，宜用异步版本（同步上下文可用阻塞加锁方法）；若保护数据且不必跨 await 持有，可用同步版本。Tokio 异步 channel 可用阻塞方法从同步上下文使用，详见[文档](https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html#communicating-between-sync-and-async-code)中何时用同步或异步 channel。
+
+该用哪种方案？
+
+- 若在做阻塞 I/O，多半应用 `spawn_blocking`。不能用第二个运行时或其他线程池（至少若要最佳性能）。
+- 若有永远运行的线程，应用 `std::thread::spawn`，不要用线程池（否则会占掉池里的一条线程）。
+- 若做*大量* CPU 工作，应用线程池——专用池或第二个异步运行时。
+- 若要运行长时间的异步代码，应用第二个运行时。
+- 也可能因简单、性能可接受而选择专用线程或 `spawn_blocking`，尽管更复杂方案更优。
 
 
-## Other blocking operations
+### 主动让出
 
-As mentioned at the start of the chapter, not blocking threads is crucial for the performance of async programs. Blocking IO of different kinds is a common way to block, but it is also possible to block by doing lots of computation or waiting in a way which the async scheduler isn't coordinating.
+长时间运行的代码有问题，因为它不给调度器机会调度其他任务。异步并发是协作式的：调度器不能抢占任务去跑别的。若长时间任务不让出，调度器无法停下它。但若长时间代码*主动让出*，其他任务可被调度，任务本身很长就不是问题。这可作为用另一线程做 CPU 密集工作、或单独运行时上 CPU 密集工作的替代，以（可能）改善性能。
 
-Waiting is most often caused by using non-async aware synchronisation mechanisms, for example, using `std::sync::Mutex` rather than an async mutex, or waiting for a non-async channel. We'll discuss this issue in the chapter on [Channels, locking, and synchronization](sync.md). There are other ways that you might wait in a blocking way, and in general you need to find a non-blocking or otherwise async-friendly mechanism, e.g., using an async `sleep` function rather than the std one. Waiting could also be a busy wait (effectively just looping without doing any work, aka a spin lock), you should probably just avoid that.
+让出很简单：调用运行时的 yield 函数。Tokio 中是 [`yield_now`](https://docs.rs/tokio/latest/tokio/task/fn.yield_now.html)。注意这与标准库的 [`yield_now`](https://doc.rust-lang.org/stable/std/thread/fn.yield_now.html) 以及协程的 `yield` 关键字都不同。若当前 Future 在 `select` 或 `join` 内运行（见[并发组合 Future](concurrency-primitives.md)一章），调用 `yield_now` 不会让出给调度器；这是否符合预期取决于你的需求。
 
-### CPU-intensive work
+何时需要让出更难判断。首先要知程序是否*隐式*让出——这只发生在 `.await`，若不 `await` 就不会让出。但 `await` 不会自动让出给调度器，只有被 `await` 的叶子 Future 为 Pending（未就绪），或调用栈中有显式 `yield` 时才会。Tokio 与多数运行时的 I/O、同步函数会这样做，但一般无法不调试或读源码就知某个 `await` 是否会让出。
 
-Doing long-running (i.e., cpu-intensive or cpu-bound) work will prevent the scheduler from running other tasks. This *is* a kind of blocking, but it is not as bad as blocking on IO or waiting because at least your program is making some progress. However (without care and consideration), it is likely to be sub-optimal for performance by some measure (e.g., tail latency) and perhaps a correctness issue if the tasks that can't run needed to be run at a particular time. There is a meme that you should simply not use async Rust (or general purpose async runtimes like Tokio) for CPU-intensive work, but that is an over-simplification. What is correct is that you cannot mix IO- and CPU-bound (or more precisely, long-running and latency-sensitive) tasks without some special handling and expect to have a good time.
+经验法则：代码在可能遇到让出点之前不应连续运行超过 10–100 微秒。
 
-For the rest of this section, we'll assume you have a mix of latency-sensitive tasks and long-running, CPU-intensive tasks. If you don't have anything which is latency-sensitive, then things are a bit different (mostly easier).
+### 参考资料
 
-There are essentially three solutions for running long-running or blocking tasks: use a runtime's built-in facilities, use a separate thread, or use a separate runtime.
-
-In Tokio, you can use [`spawn_blocking`](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html) to spawn a task which might block. This works like `spawn` for spawning a task, but runs the task in a separate thread pool which is optimized for tasks which might block (the task will likely run on it's own thread). Note that this runs regular synchronous code, not an async task. That means that the task can't be cancelled (even though it's `JoinHandle` has an `abort` method). Other runtimes provide similar functionality.
-
-You can spawn a thread to do the blocking work using [`std::thread::spawn`](https://doc.rust-lang.org/stable/std/thread/fn.spawn.html) (or similar functions). This is pretty straightforward. If you need to run a lot of tasks, you'll probably need some kind of thread pool or work scheduler. If you keep spawning threads and have many more than there are cores available, you'll end up sacrificing throughput. [Rayon](https://github.com/rayon-rs/rayon) is a popular choice which makes it easy to run and manage parallel tasks. You might get better performance with something which is more specific to your workload and/or has some knowledge of the tasks being run.
-
-You can use a separate instances of the async runtime for latency-sensitive tasks and for long-running tasks. This is suitable for CPU-bound tasks, but you still shouldn't use blocking IO, even on the runtime for long-running tasks. For CPU-bound tasks, this is a good solution in that it is the only one which supports the long-running tasks be async tasks. It is also flexible (since the runtimes can be configured to be optimal for the kind of task they're running; indeed, it is necessary to put some effort into runtime configuration to get optimal performance) and lets you benefit from using mature, well-engineered sub-systems like Tokio. You can even use two different async runtimes. In any case, the runtimes must be run on different threads.
-
-On the other hand, you do need to do a bit more thinking: you must ensure that you are running tasks on the right runtime (which can be harder than it sounds) and communication between tasks can be complicated. We'll discuss synchronisation between sync and async contexts next, but it can be even trickier between multiple async runtimes. Each runtime is it's own little universe of tasks and the schedulers are totally independent. Tokio channels and locks *can* be used from different runtimes (even non-Tokio ones), but other runtimes' primitives may not work in this way.
-
-Since the scheduler in each runtime is oblivious of other runtimes (and the OS is oblivious to any async schedulers), there is no coordination or shared prioritisation of scheduling and work cannot be stolen between runtimes. Therefore, scheduling of tasks can be sub-optimal (especially if the runtimes are not well-tuned to their workloads). Furthermore, since all scheduling is cooperative, long-running tasks can still be starved of resources and latency can suffer. See the [next section](#yielding) for how long-running tasks can be made to be more cooperative.
-
-As a pure scheduler, using Tokio for CPU work is likely to have slightly higher overheads than a dedicated, synchronous worker pool. This is not surprising when one considers the extra work required to support async programming. This is unlikely to be a problem in practice for most users, but might be worth considering if your code is extremely performance sensitive.
-
-For any of the above solutions, you will have tasks running in different contexts (sync and async, or different async runtimes). If you need to communicate between tasks, then you need to take care that you are using the correct combinations of sync and async primitives (channels, mutexes, etc.) and the correct (blocking or non-blocking) methods on those primitives. For mutexes and similar locks, you should probably use the async versions if you need to hold the lock across an await point or protect an IO resource (it should be usable from sync contexts by using a blocking lock method), or a synchronous version to protect data or where the lock does not need to be held across an await point. Tokio's async channels can be used from sync context with blocking methods, but see [these docs](https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html#communicating-between-sync-and-async-code) for some detail on when to use sync or async channels.
-
-So, which of the above solutions should you use?
-
-- If you're doing blocking IO, you should probably use `spawn_blocking`. You cannot use a second runtime or other thread pool (at least if you need optimal performance).
-- If you have a thread that will run forever, you should use `std::thread::spawn` rather than use any kind of thread pool (since it will use up one of the pool's threads).
-- If you're doing *lots* of CPU work, then you should use a thread pool, either a specialised one or a second async runtime.
-- If you need to run long-running async code, then you should use a second runtime.
-- You might choose to use a dedicated thread or `spawn_blocking` because it is easy and has satisfactory performance, even though a more complex solution is more optimal.
-
-
-### Yielding
-
-Long-running code is an issue because it doesn't give the scheduler an opportunity to schedule other tasks. Async concurrency is cooperative: the scheduler cannot pre-empt a task to run a different one. If a long-running task doesn't yield to the scheduler, then the scheduler cannot stop it. However, if the long-running code does yield to the scheduler, then other tasks can be scheduled and the fact that a task is long-running is not an issue. This can be used as an alternative to using another thread for CPU-intensive work or for CPU-intensive work on it's own runtime to (possibly) improve performance.
-
-Yielding is easy, simply call the runtime's yield function. In Tokio that is [`yield_now`](https://docs.rs/tokio/latest/tokio/task/fn.yield_now.html). Note that this is different to both the standard library's [`yield_now`](https://doc.rust-lang.org/stable/std/thread/fn.yield_now.html) and the `yield` keyword for yielding from a coroutine. Calling `yield_now` won't yield to the scheduler if the current future is being run inside a `select` or `join` (see the chapter on [composing futures concurrently](concurrency-primitives.md)); that may or may not be what you want to happen.
-
-Knowing when you need to yield is a bit more tricky. First of all you need to know if your program is implicitly yielding. This can only happen at an `.await`, so if you're not `await`ing, then you're not yielding. But await doesn't automatically yield to the scheduler. That only happens if the leaf future being `await`ed is pending (not ready) or there is an explicit `yield` somewhere in the call stack. Tokio and most async runtimes will do this in their IO and synchronization functions, but in general you can't know whether an `await` will yield without debugging or inspecting the source code.
-
-A good rule of thumb is that code should not run for more than 10-100 microseconds without hitting a potential yield point.
-
-### References
-
-- [Tokio docs on CPU-bound tasks and blocking code](https://docs.rs/tokio/latest/tokio/index.html#cpu-bound-tasks-and-blocking-code)
-- [Blog post: What is Blocking?](https://ryhl.io/blog/async-what-is-blocking/)
-- [Blog post: Using Rustlang’s Async Tokio Runtime for CPU-Bound Tasks](https://thenewstack.io/using-rustlangs-async-tokio-runtime-for-cpu-bound-tasks/)
+- [Tokio 文档：CPU-bound 任务与阻塞代码](https://docs.rs/tokio/latest/tokio/index.html#cpu-bound-tasks-and-blocking-code)
+- [博客：What is Blocking?](https://ryhl.io/blog/async-what-is-blocking/)
+- [博客：Using Rustlang’s Async Tokio Runtime for CPU-Bound Tasks](https://thenewstack.io/using-rustlangs-async-tokio-runtime-for-cpu-bound-tasks/)

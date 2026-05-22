@@ -1,29 +1,29 @@
-# Composing futures concurrently
+# 并发的组合 Future
 
-In this chapter we're going to cover more ways in which futures can be composed. In particular, some new ways in which futures can be executed concurrently (but not in parallel). Superficially, the new functions/macros we introduce in this chapter are pretty simple. However, the underlying concepts can be pretty subtle. We'll start with a recap on futures, concurrency, and parallelism, but you might also want to revisit the earlier section comparing [concurrency with parallelism](concurrency.md#concurrency-and-parallelism).
+本章介绍更多组合 Future 的方式，尤其是让 Future **并发**执行（但**不并行**）的新手段。表面上，本章引入的函数/宏很简单，底层概念却可能很微妙。我们会先回顾 Future、并发与并行，也建议你重读较早一节中[并发与并行](concurrency.md#并发与并行)的对比。
 
-A futures is a deferred computation. A future can be progressed by using `await`, which hands over control to the runtime, causing the current task to wait for the result of the computation. If `a` and `b` are futures, then they can be sequentially composed (that is, combined to make a future which executes `a` to completion and then `b` to completion) by `await`ing one then the other: `async { a.await; b.await}`.
+Future 是延后计算。用 `await` 可推进 Future，把控制权交给运行时，使当前任务等待计算结果。若 `a`、`b` 是 Future，可顺序组合（先完成 `a` 再完成 `b`）：`async { a.await; b.await }`。
 
-We have also seen parallel composition of futures using `spawn`: `async { let a = spawn(a); let b = spawn(b); (a.await, b.await)}` runs the two futures in parallel. Note that the `await`s in the tuple are not awaiting the futures themselves, but are awaiting `JoinHandle`s to get the results of the futures when they complete.
+我们也见过用 `spawn` **并行**组合 Future：`async { let a = spawn(a); let b = spawn(b); (a.await, b.await) }` 让两个 Future 并行运行。注意元组里的 `await` 不是在 await Future 本身，而是在 await `JoinHandle`，以在 Future 完成时取得结果。
 
-In this chapter we introduce two ways to compose futures concurrently without parallelism: `join` and `select`/`race`. In both cases, the futures run concurrently by time-slicing; each of the composed futures takes turns to execute then the next gets a turn. This is done *without involving the async runtime* (and therefore without multiple OS threads and without any potential for parallelism). The composing construct interleaves the futures locally. You can think of these constructs being like mini-executors which execute their component futures within a single async task.
+本章介绍两种**并发但不并行**地组合 Future 的方式：`join` 与 `select`/`race`。两种情况下，Future 通过时间片轮转并发执行：每个被组合的 Future 轮流执行一轮，再轮到下一个。这*不经过异步运行时*（因此没有多条 OS 线程，也没有并行可能）。组合构造在本地交错执行这些 Future。可以把它们想成在单个异步任务内执行其组件 Future 的迷你执行器。
 
-The fundamental difference between join and select/race is how they handle futures completing their work: a join finishes when all futures finish, a select/race finishes when one future finishes (all the others are cancelled). There are also variations of both for handling errors.
+`join` 与 `select`/`race` 的根本区别在于 Future 完成时如何处理：**join** 在所有 Future 都完成时结束；**select/race** 在有一个 Future 完成时结束（其余被取消）。两者也都有处理错误的变体。
 
-These constructs (or similar concepts) are often used with streams, we'll touch on this below, but we'll talk more about that in the [streams chapter](streams.md).
+这些构造（或类似概念）常与 stream 一起使用，下文会略提，更多见 [stream 一章](streams.md)。
 
-If you want parallelism (or you don't explicitly not want parallelism), spawning tasks is often a simpler alternative to these composition constructs. Spawning tasks is usually less error-prone, more general, and performance is more predictable. On the other hand, spawning is inherently less [structured](../part-reference/structured.md), which can make lifecycle and resource management harder to reason about.
+若需要并行（或你并未明确不要并行），生成任务往往比这些组合构造更简单：通常更少出错、更通用、性能更可预测。另一方面，spawn 天生更缺乏[结构化](../part-reference/structured.md)，生命周期与资源管理更难推理。
 
-It's worth considering the performance issue in a little more depth. The potential performance problem with concurrent composition is the fairness of time sharing. If you have 100 tasks in your program, then typically the optimal way to share resources is for each task to get 1% of the processor time (or if the tasks are all waiting, then for each to have the same chance of being woken up). If you spawn 100 tasks, then this is usually what happens (roughly). However, if you spawn two tasks and join 99 futures on one of those tasks, then the scheduler will only know about two tasks and one task will get 50% of the time and the 99 futures will each get 0.5%.
+值得稍深入考虑性能问题。并发组合的潜在问题是时间片分配的**公平性**。若程序里有 100 个任务，通常最优是让每个任务约占 1% 处理器时间（若都在等待，则唤醒机会相当）。spawn 100 个任务时大致如此。但若 spawn 两个任务，并在其中一个上 `join` 99 个 Future，调度器只知道两个任务，一个占 50%，99 个 Future 各约 0.5%。
 
-Usually the distribution of tasks is not so biased, and very often we use join/select/etc. for things like timeouts where this behaviour is actually desirable. But it is worth considering to ensure that your program has the performance characteristics you want.
+任务分布通常不会这么偏，且 `join`/`select` 等常用于超时等场景，这种行为反而合意。但仍值得考虑，确保程序具备你期望的性能特征。
 
 
-## Join
+## join
 
-Tokio's [`join` macro](https://docs.rs/tokio/latest/tokio/macro.join.html) takes a list of futures and runs them all to completion concurrently (returning all the results as a tuple). It returns when all the futures have completed. The futures are always executed on the same thread (concurrently and not in parallel).
+Tokio 的 [`join` 宏](https://docs.rs/tokio/latest/tokio/macro.join.html) 接受一组 Future，让它们全部并发执行到完成（把所有结果作为元组返回）。所有 Future 都完成时返回。Future 始终在同一线程上执行（并发、非并行）。
 
-Here's a simple example:
+简单例子：
 
 ```rust,norun
 async fn main() {
@@ -32,36 +32,36 @@ async fn main() {
 }
 ```
 
-Here, the two executions of `do_a_thing` happen concurrently, and the results are ready when they are both done. Notice that we don't `await` to get the results. `join!` implicitly awaits its futures and produces a value. It does not create a future. You do still need to use it within an async context (e.g., from within an async function).
+这里两次 `do_a_thing` 并发执行，两者都完成后结果才就绪。注意不必再 `await` 取结果——`join!` 隐式 await 其 Future 并产生值。它不创建 Future，但仍须在异步上下文中使用（例如在 async 函数内）。
 
-Although you can't see it in the example above, `join!` takes expressions which evaluate to futures[^into]. `join` does not create an async context in it's body and you shouldn't `await` the futures passed to `join` (otherwise they'll be evaluated before the joined futures).
+上例看不出来，`join!` 接受求值为 Future 的表达式[^into]。`join` 不在其体内创建异步上下文，也不应对传入 `join` 的 Future 先 `await`（否则会在被 join 的 Future 执行前就求值完毕）。
 
-Because all the futures are executed on the same thread, if any future blocks the thread, then none of them can make progress. If using a mutex or other lock, this can easily lead to deadlock if one future is waiting for a lock held by another future.
+因所有 Future 在同一线程执行，任一 Future 阻塞线程则全部无法推进。若使用 mutex 或其他锁，一个 Future 等另一个持有的锁时很容易死锁。
 
-[`join`](https://docs.rs/tokio/latest/tokio/macro.join.html) does not care about the result of the futures. In particular, if a future is cancelled or returns an error, it does not affect the others - they continue to execute. If you want 'fail fast' behaviour, use [`try_join`](https://docs.rs/tokio/latest/tokio/macro.try_join.html). `try_join` works similarly to `join`, however, if any future returns an `Err`, then all the other futures are cancelled and `try_join` returns the error immediately.
+[`join`](https://docs.rs/tokio/latest/tokio/macro.join.html) 不关心 Future 的结果类型本身。若某 Future 被取消或返回错误，不影响其他 Future——它们继续执行。若要「快速失败」，用 [`try_join`](https://docs.rs/tokio/latest/tokio/macro.try_join.html)。`try_join` 与 `join` 类似，但若任一 Future 返回 `Err`，其余 Future 会被取消，`try_join` 立即返回该错误。
 
-Back in the earlier chapter on [async/await](async-await.md), we used the word 'join' to talk about joining spawned tasks. As the name suggests, joining futures and tasks is related: joining means we execute multiple futures concurrently and wait for the result before continuing. The syntax is different: using a `JoinHandle` vs the `join` macro, but the idea is similar. The key difference is that when joining tasks, the tasks execute concurrently and in parallel, whereas using `join!`, the futures execute concurrently but not in parallel. Furthermore, spawned tasks are scheduled on the runtime's scheduler, whereas with `join!` the futures are 'scheduled' locally (on the same task and within the temporal scope of the macro's execution). Another difference is that if a spawned task panics, the panic is caught by the runtime, but if a future in `join` panics, then the whole task panics.
-
-
-### Alternatives
-
-Running futures concurrently and collecting their results is a common requirement. You should probably use `spawn` and `JoinHandle`s unless you have a good reason not to (i.e., you explicitly do not want parallelism, and even then you might prefer to use [`spawn_local`](https://docs.rs/tokio/latest/tokio/task/fn.spawn_local.html)). The [`JoinSet`](https://docs.rs/tokio/latest/tokio/task/struct.JoinSet.html) abstraction manages such spawned tasks in a way similar to `join!`.
-
-Most runtimes (and [futures.rs](https://docs.rs/futures/latest/futures/macro.join.html)) have an equivalent to Tokio's `join` macro and they mostly behave the same way. There are also `join` functions, which are similar to the macro but a little less flexible. E.g., futures.rs has [`join`](https://docs.rs/futures/latest/futures/future/fn.join.html) for joining two futures, [`join3`](https://docs.rs/futures/latest/futures/future/fn.join3.html), [`join4`](https://docs.rs/futures/latest/futures/future/fn.join4.html), and [`join5`](https://docs.rs/futures/latest/futures/future/fn.join5.html) for joining the obvious number of futures, and [join_all](https://docs.rs/futures/latest/futures/future/fn.join_all.html) for joining a collection of futures (as well as `try_` variations of each of these).
-
-[Futures-concurrency](https://docs.rs/futures-concurrency/latest) also provides functionality for join (and try_join). In the futures-concurrency style, these operations are trait methods on groups of futures such as tuples, `Vec`s, or arrays. E.g., to join two futures, you would write `(fut1, fut2).join().await` (note that `await` is explicit here).
-
-If the set of futures you wish to join together varies dynamically (e.g., new futures are created as input comes in over the network), or you want the results as they complete rather than when all the futures have completed, then you'll need to use streams and the [`FuturesUnordered`](https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html) or [`FuturesOrdered`](https://docs.rs/futures/latest/futures/stream/struct.FuturesOrdered.html) functionality. We'll cover these in the [streams](streams.md) chapter.
+在较早的 [async/await](async-await.md) 一章里，我们用「join」指合并已 spawn 的任务。顾名思义，合并 Future 与合并任务相关：并发执行多个 Future 并等待结果后再继续。语法不同：用 `JoinHandle` 还是 `join` 宏，但思想相近。关键区别：合并**任务**时任务并发且并行；用 `join!` 时 Future 并发但不并行。此外，spawn 的任务 panic 由运行时捕获；`join` 里某 Future panic 则整个任务 panic。spawn 的任务由运行时调度器调度；`join!` 则在本地「调度」（同一任务、宏执行的时间范围内）。
 
 
-[^into]: The expressions must have a type which implements `IntoFuture`. The expression is evaluated and converted to a future by the macro. I.e., they don't actually have to evaluate to a future, but rather something which can be converted into a future, but this is a pretty minor distinction. The expressions themselves are evaluated sequentially before any of the resulting futures are executed.
+### 替代方案
+
+并发运行 Future 并收集结果是常见需求。除非有充分理由（即你明确不要并行，即便如此也可能更倾向 [`spawn_local`](https://docs.rs/tokio/latest/tokio/task/fn.spawn_local.html)），否则应优先用 `spawn` 与 `JoinHandle`。 [`JoinSet`](https://docs.rs/tokio/latest/tokio/task/struct.JoinSet.html) 以类似 `join!` 的方式管理这类已 spawn 任务。
+
+多数运行时（以及 [futures.rs](https://docs.rs/futures/latest/futures/macro.join.html)）有与 Tokio `join` 宏等价的设施，行为大体相同。也有 `join` **函数**，比宏略不灵活。例如 futures.rs 有 [`join`](https://docs.rs/futures/latest/futures/future/fn.join.html)（两个 Future）、[`join3`](https://docs.rs/futures/latest/futures/future/fn.join3.html) 至 [`join5`](https://docs.rs/futures/latest/futures/future/fn.join5.html)，以及 [`join_all`](https://docs.rs/futures/latest/futures/future/fn.join_all.html)（集合），各有 `try_` 变体。
+
+[futures-concurrency](https://docs.rs/futures-concurrency/latest) 也提供 join（与 try_join）。在其风格下，这些操作是 Future 组（元组、`Vec`、数组等）上的 trait 方法。例如合并两个 Future：`(fut1, fut2).join().await`（这里 `await` 是显式的）。
+
+若要 join 的 Future 集合在运行时动态变化（例如随网络输入不断创建新 Future），或希望在各 Future 完成时逐个取结果而非等全部完成，则需用 stream 以及 [`FuturesUnordered`](https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html) 或 [`FuturesOrdered`](https://docs.rs/futures/latest/futures/stream/struct.FuturesOrdered.html)，在 [stream](streams.md) 一章介绍。
 
 
-## Race/select
+[^into]: 表达式类型须实现 `IntoFuture`。宏会求值表达式并转换为 Future，即不必直接是 Future，而是可转换为 Future 的类型——差别很小。表达式本身会在任何结果 Future 执行*之前*按顺序求值。
 
-The counterpart to joining futures is racing them (aka selecting on them). With race/select the futures are executed concurrently, but rather than waiting for all the futures to complete, we only wait for the first one to complete and then cancel the others. Although this sounds similar to joining, it is significantly more interesting (and sometimes error-prone) because now we have to reason about cancellation.
 
-Here's an example using Tokio's [`select`](https://docs.rs/tokio/latest/tokio/macro.select.html) macro:
+## 竞速 / select
+
+与 join 相对的是 **race**（即 **select**）。race/select 下 Future 并发执行，但只等*第一个*完成，然后取消其余。听起来与 join 相似，但因涉及取消而复杂得多（有时更易出错）。
+
+用 Tokio 的 [`select`](https://docs.rs/tokio/latest/tokio/macro.select.html) 宏的例子：
 
 ```rust,norun
 async fn main() {
@@ -76,15 +76,15 @@ async fn main() {
 }
 ```
 
-You'll notice things are already more interesting than with the `join` macro because we handle the results of the futures within the `select` macro. It looks a bit like a `match` expression, but with `select`, all branches are run concurrently and the body of the branch which finishes first is executed with its result (the other branches are not executed and the futures are cancelled by `drop`ping). In the example, `do_a_thing` and `timeout` execute concurrently and the first to complete will have it's block executed (i.e., only one `println` will run), the other future will be cancelled. As with the `join` macro, awaiting the futures is implicit.
+比 `join` 宏更有趣：`select` 有点像 `match`，但所有分支并发运行，最先完成的分支以其结果执行体（其余分支不执行，Future 通过 `drop` 取消）。上例中 `do_a_thing` 与 `timeout` 并发，只有一个 `println` 会执行。与 `join` 一样，await 是隐式的。
 
-Tokio's `select` macro supports a bunch of features:
+Tokio 的 `select` 宏支持多种特性：
 
-- pattern matching: the syntax on the left of `=` on each branch can be a pattern and the block is only executed if the result of the future matches the pattern. If the pattern does not match, then the future is no longer polled (but other futures are). This can be useful for futures which optionally return a value, e.g., `Some(x) = do_a_thing() => { ... }`.
-- `if` guards: each branch may have an `if` guard. When the `select` macro runs, after evaluating each expression to produce a future, the `if` guard is evaluated and the future is only polled if the guard is true. E.g., `x = = do_a_thing() if false => { ... }` will never be polled. Note that the `if` guard is not re-evaluated during polling, only when the macro is initialized.
-- `else` branch: `select` can have an `else` branch `else => { ... }`, this is executed if all the futures have stopped and none of the blocks have been executed. If this happens without an `else` branch, then `select` will panic.
+- **模式匹配**：每分支 `=` 左侧可以是模式，仅当 Future 结果匹配时才执行该分支体；不匹配则不再 poll 该 Future（其他 Future 仍 poll）。对可选返回值有用，例如 `Some(x) = do_a_thing() => { ... }`。
+- **`if` 守卫**：每分支可有 `if` 守卫。`select` 运行时，表达式求值为 Future 后评估守卫，仅守卫为真才 poll 该 Future。例如 `x = do_a_thing() if false => { ... }` 永不被 poll。注意守卫只在宏初始化时评估，poll 过程中不重新评估。
+- **`else` 分支**：可有 `else => { ... }`，当所有 Future 都停止且没有任何分支体被执行时运行。若无 `else` 且发生这种情况，`select` 会 panic。
 
-The value of the `select!` macro is the value of the executed branch (just like `match`), so all branches must have the same type. E.g., if we wanted to use the result of the above example outside of the `select`, we'd write it like
+`select!` 宏的值是所执行分支的值（同 `match`），故所有分支类型须相同。若要在 `select` 外使用结果，可写成：
 
 ```rust,norun
 async fn main() {
@@ -101,11 +101,11 @@ async fn main() {
 }
 ```
 
-As with `join!`, `select!` does not treat `Result`s in any special way (other than the pattern matching mentioned previously) and if a branch completes with an error, then all other branches will be cancelled and the error will be used as the result of select (in the same way as if the branch has completed successfully).
+与 `join!` 一样，`select!` 不以特殊方式处理 `Result`（除前述模式匹配外）；若某分支以错误完成，其余分支会被取消，错误作为 select 的结果（与成功完成相同方式）。
 
-The `select` macro intrinsically uses cancellation, so if you're trying to avoid cancellation in your program, you must avoid `select!`. In fact, `select` is often the primary source of cancellation in an async program. As discussed [elsewhere](../part-reference/cancellation.md), cancellation has many subtle issues which can lead to bugs. In particular, note that `select` cancels futures by simply dropping them. This will not notify the future being dropped or trigger any cancellation tokens, etc.
+`select` 宏内在使用取消，若程序要避免取消，就必须避免 `select!`。事实上 `select` 常常是异步程序取消的主要来源。如[别处](../part-reference/cancellation.md)所述，取消有许多微妙问题可导致 bug。尤其注意：`select` 通过直接 drop Future 来取消，不会通知被 drop 的 Future，也不会触发 cancellation token 等。
 
-`select!` is often used in a loop to handle streams or other sequences of futures. This adds an extra layer of complexity and opportunities for bugs. In the simple case that we create a new, independent future on each iteration of the loop, things are not much more complicated. However, this is rarely what is needed. Generally we want to preserve some state between iterations. It is common to use `select` in a loop with streams, where each iteration of the loop handles one result from the stream. E.g.:
+`select!` 常在循环中处理 stream 或其他 Future 序列，又多一层复杂与 bug 机会。若每轮循环创建新的独立 Future，情况尚简单，但这很少够用。通常需在迭代间保留状态。常见用法是在循环里用 `select` 处理 stream 的每一项，例如：
 
 ```rust,norun
 async fn main() {
@@ -128,9 +128,9 @@ async fn main() {
 }
 ```
 
-In this example, we read values from `stream` and print them until there are none left or waiting for a result times out. What happens to any remaining data in the stream in the timeout case depends on the implementation of the stream (it might be lost! Or duplicated!). This is an example of why behaviour in the face of cancellation can be important (and tricky).
+从 `stream` 读取并打印，直到没有数据或等待超时。超时情况下 stream 中剩余数据如何处理取决于 stream 实现（可能丢失或重复！）。这是取消时行为为何重要（且棘手）的一例。
 
-We may want to reuse a future, not just a stream, across iterations. For example, we may want to race against a timeout future where the timeout applies to all iterations rather than applying a new timeout for each iteration. This is possible by creating the future outside of the loop and referencing it:
+我们可能想在多次迭代间复用 Future，而不只是 stream——例如与超时 Future 竞速，且超时适用于所有迭代而非每轮新建超时。可在循环外创建 Future 并引用它：
 
 ```rust,norun
 async fn main() {
@@ -155,45 +155,45 @@ async fn main() {
 }
 ```
 
-There are a couple of important details when using `select!` in a loop with futures or streams created outside of the `select!`. These are a fundamental consequence of how `select` works, so I'll introduce them by stepping through the details of `select`, using `timeout` in the last example as an example.
+在循环里对 `select!` 使用循环外创建的 Future 或 stream 时，有几个重要细节——这是 `select` 工作方式的必然结果。以下用上一例的 `timeout` 逐步说明：
 
-- `timeout` is created outside of the loop and initialised with some time to count down.
-- On each iteration of the loop, `select` creates a reference to `timeout`, but does not change its state.
-- As `select` executes, it polls `timeout` which will return `Pending` while there is time left and `Ready` when the time elapses, at which point its block is executed.
+- `timeout` 在循环外创建并开始倒计时。
+- 每轮循环 `select` 创建对 `timeout` 的引用，但不改变其状态。
+- `select` 执行时 poll `timeout`：尚有时间则返回 `Pending`，时间到则返回 `Ready` 并执行其分支。
 
-In the above example, when `timeout` is ready, we `break` out of the loop. But what if we didn't do that? In that case, `select` would simply poll `timeout` again, which the `Future` [docs](https://doc.rust-lang.org/std/future/trait.Future.html#tymethod.poll) say should not happen! `select` can't help this, it doesn't have any state (between iterations) to decide if `timeout` should be polled. Depending on how `timeout` is written, this might cause a panic, a logic error, or some kind of crash.
+上例中 `timeout` 就绪时我们 `break`。若不 `break` 呢？`select` 会再次 poll `timeout`，而 `Future` [文档](https://doc.rust-lang.org/std/future/trait.Future.html#tymethod.poll) 说不应如此！`select` 无法在迭代间保存状态来判断是否还应 poll `timeout`。取决于 `timeout` 的实现，可能 panic、逻辑错误或崩溃。
 
-You can prevent this kind of bug in several ways:
+可用几种方式避免这类 bug：
 
-- Use a [fused](futures.md#fusing) [future](https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.fuse) or [stream](https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.fuse) so that re-polling is safe.
-- Ensure that your code is structured so that futures are never re-polled, e.g., by breaking out of the loop (as in the previous example), or by using an `if` guard.
+- 使用[融合（fused）](futures.md#fusing)的 [future](https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.fuse) 或 [stream](https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.fuse)，使重复 poll 安全。
+- 调整结构，确保 Future 不会被重复 poll，例如 `break` 出循环（如上），或使用 `if` 守卫。
 
-Now, lets consider the type of `&mut timeout`. Lets assume that `timeout()` returns a type which implements `Future`, which might be an anonymous type from an async function, or it might be a named type like `Timeout`. Lets assume the latter because it makes the examples easier (but the logic applies in either case). Given that `Timeout` implents `Future`, will `&mut Timeout` implement `Future`? Not necessarily! There is a [blanket `impl`](https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-%26mut+F) which makes this true, but only if `Timeout` implements `Unpin`. That is not the case for all futures, so often you'll get a type error writing code like the last example. Such an error is easily fixed though by using the `pin` macro, e.g., `let mut timeout = pin!(timeout());`
+`&mut timeout` 的类型呢？假设 `timeout()` 返回实现 `Future` 的类型，可能是 async 函数的匿名类型，也可能是 `Timeout` 等具名类型。假设后者以便举例（逻辑对匿名类型同样适用）。`Timeout` 实现了 `Future`，`&mut Timeout` 是否也实现 `Future`？不一定！有[空白实现](https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-%26mut+F) 成立，但仅当 `Timeout` 实现 `Unpin`。并非所有 Future 都 `Unpin`，因此上例类代码常报类型错误，用 `pin` 宏即可修复，例如 `let mut timeout = pin!(timeout());`
 
-Cancellation with `select` in a loop is a rich source of subtle bugs. These usually happen where a future contains some state involving some data but not the data itself. When the future is dropped by cancellation, that state is lost but the underlying data is not updated. This can lead to data being lost or processed multiple times.
-
-
-### Alternatives
-
-Futures.rs has its own [`select` macro](https://docs.rs/futures/latest/futures/macro.select.html) and futures-concurrency has a [Race trait](https://docs.rs/futures-concurrency/latest/futures_concurrency/future/trait.Race.html) which are alternatives to Tokio's `select` macro. These both have the same core semantics of concurrently racing multiple futures, processing the result of the first and cancelling the others, but they have different syntax and vary in the details.
-
-Futures.rs' `select` is superficially similar to Tokio's; to summarize the differences, in the futures.rs version:
-
-- Futures must always be fused (enforced by type-checking).
-- `select` has `default` and `complete` branches, rather than an `else` branch.
-- `select` does not support `if` guards.
-
-Futures-concurrency's `Race` has a very different syntax, similar to it's version of `join`, e.g., `(future_a, future_b).race().await` (it works on `Vec`s and arrays as well as tuples). The syntax is less flexible than the macros, but fits in nicely with most async code. Note that if you use `race` within a loop, you can still have the same issues as with `select`.
-
-As with `join`, spawning tasks and letting them execute in parallel is often a good alternative to using `select`. However, cancelling the remaining tasks after the first completes requires some extra work. This can be done using channels or a cancellation token. In either case, cancellation requires some action by the task being cancelled which means the task can do some tidying up or other graceful shutdown.
-
-A common use for `select` (especially inside a loop) is working with streams. There are stream combinator methods which can replace some uses of select. For example, [`merge`](https://docs.rs/futures-concurrency/latest/futures_concurrency/stream/trait.Merge.html) in futures-concurrency is a good alternative to merge multiple streams together.
+在循环里用 `select` 取消是微妙 bug 的富矿，常发生在 Future 持有涉及某些数据的状态（而非数据本身）时：取消 drop Future 会丢掉状态，底层数据却未更新，导致数据丢失或重复处理。
 
 
-## Final words
+### 替代方案
 
-In this section we've talked about two ways to run groups of futures concurrently. Joining futures means waiting for them all to finish; selecting (aka racing) futures means waiting for the first to finish. In contrast to spawning tasks, these compositions make no use of parallelism.
+futures.rs 有自己的 [`select` 宏](https://docs.rs/futures/latest/futures/macro.select.html)，futures-concurrency 有 [Race trait](https://docs.rs/futures-concurrency/latest/futures_concurrency/future/trait.Race.html)，都是 Tokio `select` 的替代。核心语义相同：并发竞速多个 Future，处理最先完成者的结果并取消其余，但语法与细节不同。
 
-Both `join` and `select` operate on sets of futures which are known in advance (often when writing the program, rather than at runtime). Sometimes, the futures to be composed are not known in advance - futures must be added to the set of composed futures as they are being executed. For this we need [streams](streams.md) which have their own composition operations.
+futures.rs 的 `select` 表面上类似 Tokio，差异概括如下：
 
-It's worth reiterating that although these composition operators are powerful and expressive, it is often easier and more appropriate to use tasks and spawning: parallelism is often desirable, you're less likely to have bugs around cancellation or blocking, and resource allocation is usually fairer (or at least simpler) and more predictable.
+- Future 必须始终为 fused（类型系统强制）。
+- `select` 有 `default` 与 `complete` 分支，而非 `else`。
+- `select` 不支持 `if` 守卫。
+
+futures-concurrency 的 `Race` 语法很不同，类似其 `join` 风格，例如 `(future_a, future_b).race().await`（也支持 `Vec` 与数组）。语法不如宏灵活，但与多数 async 代码契合。注意在循环里用 `race` 仍可能有与 `select` 相同的问题。
+
+与 `join` 一样，spawn 任务让其并行执行常是 `select` 的好替代。但要在第一个完成后取消其余任务需额外工作，可用 channel 或 cancellation token。无论哪种，被取消的任务都需配合行动，从而可做清理或优雅关闭。
+
+`select`（尤其在循环内）常用于 stream。有些 stream 组合子可替代部分 `select` 用法，例如 futures-concurrency 的 [`merge`](https://docs.rs/futures-concurrency/latest/futures_concurrency/stream/trait.Merge.html) 适合合并多个 stream。
+
+
+## 结语
+
+本节讨论了两种让一组 Future 并发运行的方式：**join** 等待全部完成；**select**（竞速）等待第一个完成。与 spawn 任务不同，这些组合不使用并行。
+
+`join` 与 `select` 作用于事先已知的一组 Future（常在写程序时而非运行时）。有时要被组合的 Future 事先未知——须在执行过程中动态加入。这需要 [stream](streams.md) 及其组合操作。
+
+值得再次强调：尽管这些组合算子强大且富有表现力，使用任务与 spawn 往往更简单、更合适：并行通常更可取，更少遇到取消或阻塞相关的 bug，资源分配通常更公平（或至少更简单）、更可预测。
